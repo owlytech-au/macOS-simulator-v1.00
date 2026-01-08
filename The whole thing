@@ -1,0 +1,1320 @@
+# 1) Create app
+npm create vite@latest web-macos -- --template react
+cd web-macos
+import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App.jsx";
+import "./styles.css";
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Rnd } from "react-rnd";
+import {
+  Apple,
+  Finder,
+  StickyNote,
+  TerminalSquare,
+  Settings,
+  Trash2,
+  Compass,
+  FolderPlus,
+  FilePlus2,
+  Search,
+  RefreshCcw,
+  X,
+  Minus,
+  Square
+} from "lucide-react";
+
+/**
+ * WEB macOS (advanced)
+ * - window manager (z-index, focus)
+ * - dock with running indicators
+ * - menu bar
+ * - apps: Finder, Notes, Terminal, Safari, Settings, Trash
+ * - virtual filesystem + trash
+ * - persistence via localStorage
+ */
+
+const LS_KEY = "webmacos_state_v1";
+
+const WALLPAPERS = [
+  { id: "gradient", name: "Gradient", className: "wp-gradient" },
+  { id: "aurora", name: "Aurora", className: "wp-aurora" },
+  { id: "ocean", name: "Ocean", className: "wp-ocean" },
+  { id: "mono", name: "Mono", className: "wp-mono" },
+];
+
+const DEFAULT_FS = {
+  "/": { type: "dir", children: ["Home", "Applications", "Documents", "Downloads"] },
+  "/Home": { type: "dir", children: ["Desktop", "Notes.txt"] },
+  "/Home/Desktop": { type: "dir", children: ["Welcome.txt"] },
+  "/Home/Documents": { type: "dir", children: ["Readme.md"] },
+  "/Home/Downloads": { type: "dir", children: [] },
+  "/Applications": { type: "dir", children: ["Finder.app", "Notes.app", "Terminal.app", "Safari.app", "Settings.app", "Trash.app"] },
+
+  "/Home/Notes.txt": { type: "file", content: "Tip: Open Notes from the Dock. Your notes autosave.\n" },
+  "/Home/Desktop/Welcome.txt": {
+    type: "file",
+    content:
+      "Welcome to Web macOS.\n\n- Drag windows around\n- Resize from edges\n- Use Finder to browse files\n- Use Terminal commands (type `help`)\n- Use Trash to restore or empty\n"
+  },
+  "/Home/Documents/Readme.md": {
+    type: "file",
+    content:
+      "# Web macOS\n\nThis is a macOS-like desktop UI running in the browser.\n\nIt is NOT real macOS.\n"
+  },
+  "/Applications/Finder.app": { type: "app" },
+  "/Applications/Notes.app": { type: "app" },
+  "/Applications/Terminal.app": { type: "app" },
+  "/Applications/Safari.app": { type: "app" },
+  "/Applications/Settings.app": { type: "app" },
+  "/Applications/Trash.app": { type: "app" },
+};
+
+function nowClockString() {
+  const d = new Date();
+  const opts = { weekday: "short", hour: "2-digit", minute: "2-digit" };
+  return d.toLocaleString(undefined, opts);
+}
+
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function pathJoin(a, b) {
+  if (a.endsWith("/")) a = a.slice(0, -1);
+  if (!b.startsWith("/")) b = "/" + b;
+  if (a === "") a = "/";
+  return a === "/" ? b : a + b;
+}
+
+function pathDirname(p) {
+  if (p === "/") return "/";
+  const parts = p.split("/").filter(Boolean);
+  parts.pop();
+  return "/" + parts.join("/");
+}
+
+function pathBasename(p) {
+  if (p === "/") return "/";
+  const parts = p.split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? "/";
+}
+
+function ensureUniqueName(names, base) {
+  if (!names.includes(base)) return base;
+  const dot = base.lastIndexOf(".");
+  const stem = dot > 0 ? base.slice(0, dot) : base;
+  const ext = dot > 0 ? base.slice(dot) : "";
+  let i = 2;
+  while (names.includes(`${stem} ${i}${ext}`)) i++;
+  return `${stem} ${i}${ext}`;
+}
+
+function useLocalStorageState() {
+  const [loaded, setLoaded] = useState(false);
+  const [state, setState] = useState(null);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        setState(parsed);
+      } else {
+        setState({
+          wallpaper: "aurora",
+          darkMode: true,
+          fs: DEFAULT_FS,
+          trash: [], // {fromPath, itemName, itemNodeSnapshot}
+          notes: "",
+          windows: {},
+        });
+      }
+    } catch {
+      setState({
+        wallpaper: "aurora",
+        darkMode: true,
+        fs: DEFAULT_FS,
+        trash: [],
+        notes: "",
+        windows: {},
+      });
+    } finally {
+      setLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded || !state) return;
+    localStorage.setItem(LS_KEY, JSON.stringify(state));
+  }, [loaded, state]);
+
+  return { loaded, state, setState };
+}
+
+function IconForItem({ name, type }) {
+  const lower = String(name).toLowerCase();
+  if (type === "dir") return <FolderIcon />;
+  if (type === "file") return <FileIcon />;
+  if (type === "app") {
+    if (lower.includes("finder")) return <Finder className="ico" />;
+    if (lower.includes("notes")) return <StickyNote className="ico" />;
+    if (lower.includes("terminal")) return <TerminalSquare className="ico" />;
+    if (lower.includes("safari")) return <Compass className="ico" />;
+    if (lower.includes("settings")) return <Settings className="ico" />;
+    if (lower.includes("trash")) return <Trash2 className="ico" />;
+    return <Apple className="ico" />;
+  }
+  return <FileIcon />;
+}
+
+function FolderIcon() {
+  return (
+    <svg className="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a3 3 0 0 1-3 3h-14a3 3 0 0 1-3-3v-10z" className="svg-stroke" />
+      <path d="M3.5 9.5h19" className="svg-stroke" />
+    </svg>
+  );
+}
+
+function FileIcon() {
+  return (
+    <svg className="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M7 3.5h7l3 3v14A2.5 2.5 0 0 1 14.5 23h-7A2.5 2.5 0 0 1 5 20.5v-14A3 3 0 0 1 8 3.5z" className="svg-stroke" />
+      <path d="M14 3.5v4h4" className="svg-stroke" />
+    </svg>
+  );
+}
+
+const APP_REGISTRY = {
+  finder: { id: "finder", title: "Finder", icon: Finder, default: { w: 760, h: 480 } },
+  notes: { id: "notes", title: "Notes", icon: StickyNote, default: { w: 560, h: 420 } },
+  terminal: { id: "terminal", title: "Terminal", icon: TerminalSquare, default: { w: 720, h: 420 } },
+  safari: { id: "safari", title: "Safari", icon: Compass, default: { w: 820, h: 520 } },
+  settings: { id: "settings", title: "Settings", icon: Settings, default: { w: 560, h: 420 } },
+  trash: { id: "trash", title: "Trash", icon: Trash2, default: { w: 520, h: 420 } },
+};
+
+function makeWinId(appId) {
+  return `${appId}-${Math.random().toString(16).slice(2)}`;
+}
+
+function defaultWindowRect(appId) {
+  const base = APP_REGISTRY[appId]?.default ?? { w: 640, h: 420 };
+  const x = 120 + Math.floor(Math.random() * 140);
+  const y = 90 + Math.floor(Math.random() * 120);
+  return { x, y, w: base.w, h: base.h };
+}
+
+function WindowChrome({
+  title,
+  focused,
+  onClose,
+  onMinimize,
+  onMaximize,
+  maximized,
+}) {
+  return (
+    <div className={`win-titlebar ${focused ? "focused" : ""}`}>
+      <div className="win-controls">
+        <button className="dot red" title="Close" onClick={onClose} aria-label="Close">
+          <X size={10} />
+        </button>
+        <button className="dot yellow" title="Minimize" onClick={onMinimize} aria-label="Minimize">
+          <Minus size={10} />
+        </button>
+        <button className="dot green" title={maximized ? "Restore" : "Maximize"} onClick={onMaximize} aria-label="Maximize">
+          <Square size={10} />
+        </button>
+      </div>
+      <div className="win-title">{title}</div>
+      <div className="win-title-spacer" />
+    </div>
+  );
+}
+
+export default function App() {
+  const { loaded, state, setState } = useLocalStorageState();
+  const [clock, setClock] = useState(nowClockString());
+
+  // Window manager runtime state
+  const [windows, setWindows] = useState([]); // {id, appId, title, x,y,w,h,z, minimized, maximized, data}
+  const [focusedId, setFocusedId] = useState(null);
+
+  // Finder selection / Desktop icons
+  const [desktopSelection, setDesktopSelection] = useState(null);
+
+  // Menu state
+  const [appleMenuOpen, setAppleMenuOpen] = useState(false);
+
+  const desktopRef = useRef(null);
+
+  useEffect(() => {
+    const t = setInterval(() => setClock(nowClockString()), 10_000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    const onDoc = (e) => {
+      // close menus on outside click
+      if (appleMenuOpen) setAppleMenuOpen(false);
+    };
+    document.addEventListener("click", onDoc);
+    return () => document.removeEventListener("click", onDoc);
+  }, [appleMenuOpen]);
+
+  // load persisted windows if you want; this starter keeps windows ephemeral
+  // but persists FS + notes + settings.
+  const wallpaper = state?.wallpaper ?? "aurora";
+  const darkMode = state?.darkMode ?? true;
+
+  const fs = state?.fs ?? DEFAULT_FS;
+  const trash = state?.trash ?? [];
+  const notesPersisted = state?.notes ?? "";
+
+  const desktopPath = "/Home/Desktop";
+  const desktopItems = useMemo(() => {
+    const node = fs[desktopPath];
+    if (!node || node.type !== "dir") return [];
+    return node.children.map((name) => {
+      const p = pathJoin(desktopPath, name);
+      const n = fs[p];
+      return { name, path: p, node: n };
+    });
+  }, [fs]);
+
+  function bumpZ(id) {
+    setWindows((prev) => {
+      const maxZ = prev.reduce((m, w) => Math.max(m, w.z), 0);
+      return prev.map((w) => (w.id === id ? { ...w, z: maxZ + 1 } : w));
+    });
+    setFocusedId(id);
+  }
+
+  function openApp(appId, opts = {}) {
+    const app = APP_REGISTRY[appId];
+    if (!app) return;
+
+    // If app is single-instance, focus if already running:
+    const existing = windows.find((w) => w.appId === appId && !w.closed);
+    if (existing && (appId === "settings" || appId === "trash")) {
+      // Settings + Trash single instance
+      setWindows((prev) =>
+        prev.map((w) =>
+          w.id === existing.id ? { ...w, minimized: false } : w
+        )
+      );
+      bumpZ(existing.id);
+      return;
+    }
+
+    const id = makeWinId(appId);
+    const rect = defaultWindowRect(appId);
+    const title = opts.title ?? app.title;
+
+    const wobj = {
+      id,
+      appId,
+      title,
+      ...rect,
+      z: Math.max(1, ...windows.map((w) => w.z)) + 1,
+      minimized: false,
+      maximized: false,
+      data: opts.data ?? {},
+    };
+
+    setWindows((prev) => [...prev, wobj]);
+    setFocusedId(id);
+  }
+
+  function closeWindow(id) {
+    setWindows((prev) => prev.filter((w) => w.id !== id));
+    if (focusedId === id) setFocusedId(null);
+  }
+
+  function minimizeWindow(id) {
+    setWindows((prev) => prev.map((w) => (w.id === id ? { ...w, minimized: true } : w)));
+    if (focusedId === id) setFocusedId(null);
+  }
+
+  function toggleMaximize(id) {
+    const el = desktopRef.current;
+    const boundsW = el?.clientWidth ?? window.innerWidth;
+    const boundsH = el?.clientHeight ?? window.innerHeight;
+
+    setWindows((prev) =>
+      prev.map((w) => {
+        if (w.id !== id) return w;
+        if (!w.maximized) {
+          return {
+            ...w,
+            maximized: true,
+            prevRect: { x: w.x, y: w.y, w: w.w, h: w.h },
+            x: 8,
+            y: 36 + 8, // below menubar
+            w: boundsW - 16,
+            h: boundsH - (36 + 16),
+          };
+        }
+        const pr = w.prevRect ?? { x: 120, y: 90, w: 640, h: 420 };
+        return { ...w, maximized: false, x: pr.x, y: pr.y, w: pr.w, h: pr.h, prevRect: undefined };
+      })
+    );
+    bumpZ(id);
+  }
+
+  function setFS(updater) {
+    setState((s) => ({ ...s, fs: updater(s.fs) }));
+  }
+
+  function setTrash(updater) {
+    setState((s) => ({ ...s, trash: updater(s.trash) }));
+  }
+
+  function setNotes(text) {
+    setState((s) => ({ ...s, notes: text }));
+  }
+
+  function setWallpaper(id) {
+    setState((s) => ({ ...s, wallpaper: id }));
+  }
+
+  function setDarkMode(v) {
+    setState((s) => ({ ...s, darkMode: v }));
+  }
+
+  function createInDir(dirPath, kind) {
+    const dir = fs[dirPath];
+    if (!dir || dir.type !== "dir") return;
+
+    setFS((prev) => {
+      const children = [...(prev[dirPath]?.children ?? [])];
+      const base = kind === "dir" ? "New Folder" : "New File.txt";
+      const name = ensureUniqueName(children, base);
+      const newPath = pathJoin(dirPath, name);
+
+      const next = { ...prev };
+      next[dirPath] = { ...next[dirPath], children: [...children, name] };
+      next[newPath] = kind === "dir" ? { type: "dir", children: [] } : { type: "file", content: "" };
+      return next;
+    });
+  }
+
+  function moveToTrash(itemPath) {
+    const node = fs[itemPath];
+    if (!node) return;
+
+    const parent = pathDirname(itemPath);
+    const name = pathBasename(itemPath);
+
+    // remove recursively from fs
+    const snapshot = snapshotNode(fs, itemPath);
+
+    setFS((prev) => {
+      const next = { ...prev };
+      // remove from parent children
+      if (next[parent]?.type === "dir") {
+        next[parent] = { ...next[parent], children: next[parent].children.filter((c) => c !== name) };
+      }
+      // delete all snapshot keys
+      Object.keys(snapshot).forEach((k) => delete next[k]);
+      return next;
+    });
+
+    setTrash((prev) => [...prev, { fromPath: itemPath, itemName: name, snapshot }]);
+  }
+
+  function restoreTrash(index) {
+    const item = trash[index];
+    if (!item) return;
+
+    const fromPath = item.fromPath;
+    const parent = pathDirname(fromPath);
+    const name = pathBasename(fromPath);
+
+    setFS((prev) => {
+      const next = { ...prev };
+
+      // ensure parent exists
+      if (!next[parent]) {
+        // if parent chain missing, restore into /Home/Desktop instead
+        const fallback = "/Home/Desktop";
+        const fallbackParent = fallback;
+        const children = next[fallbackParent]?.children ?? [];
+        const unique = ensureUniqueName(children, name);
+        const basePath = pathJoin(fallbackParent, unique);
+
+        // rewrite snapshot paths to new base
+        const rewritten = rewriteSnapshotBase(item.snapshot, fromPath, basePath);
+
+        next[fallbackParent] = { ...next[fallbackParent], children: [...children, unique] };
+        Object.assign(next, rewritten);
+        return next;
+      }
+
+      const children = next[parent]?.children ?? [];
+      const unique = ensureUniqueName(children, name);
+      const basePath = pathJoin(parent, unique);
+
+      const rewritten = rewriteSnapshotBase(item.snapshot, fromPath, basePath);
+      next[parent] = { ...next[parent], children: [...children, unique] };
+      Object.assign(next, rewritten);
+      return next;
+    });
+
+    setTrash((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function emptyTrash() {
+    setTrash(() => []);
+  }
+
+  function openPath(path) {
+    const node = fs[path];
+    if (!node) return;
+    if (node.type === "dir") {
+      openApp("finder", { data: { initialPath: path } });
+    } else if (node.type === "file") {
+      // open file in Notes (simple) or Finder preview
+      openApp("notes", { data: { openFilePath: path } });
+    } else if (node.type === "app") {
+      const base = pathBasename(path).toLowerCase();
+      if (base.includes("finder")) openApp("finder");
+      else if (base.includes("notes")) openApp("notes");
+      else if (base.includes("terminal")) openApp("terminal");
+      else if (base.includes("safari")) openApp("safari");
+      else if (base.includes("settings")) openApp("settings");
+      else if (base.includes("trash")) openApp("trash");
+    }
+  }
+
+  const runningApps = useMemo(() => {
+    const ids = new Set(windows.map((w) => w.appId));
+    return Array.from(ids);
+  }, [windows]);
+
+  if (!loaded || !state) {
+    return (
+      <div className="boot">
+        <div className="boot-card">
+          <div className="boot-logo"><Apple size={28} /></div>
+          <div className="boot-text">Loading Web macOS…</div>
+          <div className="boot-bar"><div className="boot-bar-fill" /></div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={`root ${darkMode ? "dark" : "light"} ${WALLPAPERS.find(w => w.id === wallpaper)?.className ?? "wp-aurora"}`}
+      onClick={() => setDesktopSelection(null)}
+    >
+      <MenuBar
+        clock={clock}
+        appName={getFocusedAppName(windows, focusedId)}
+        appleMenuOpen={appleMenuOpen}
+        setAppleMenuOpen={setAppleMenuOpen}
+        onOpenApp={openApp}
+        onAbout={() => openApp("settings")}
+      />
+
+      <div className="desktop" ref={desktopRef}>
+        <DesktopIcons
+          items={desktopItems}
+          selection={desktopSelection}
+          setSelection={setDesktopSelection}
+          onOpen={openPath}
+          onTrash={moveToTrash}
+        />
+
+        {/* Windows */}
+        {windows
+          .filter((w) => !w.minimized)
+          .sort((a, b) => a.z - b.z)
+          .map((w) => (
+            <AppWindow
+              key={w.id}
+              win={w}
+              focused={w.id === focusedId}
+              onFocus={() => bumpZ(w.id)}
+              onClose={() => closeWindow(w.id)}
+              onMin={() => minimizeWindow(w.id)}
+              onMax={() => toggleMaximize(w.id)}
+              boundsRef={desktopRef}
+              setWin={(patch) =>
+                setWindows((prev) => prev.map((x) => (x.id === w.id ? { ...x, ...patch } : x)))
+              }
+            >
+              <AppRenderer
+                win={w}
+                fs={fs}
+                setFS={setFS}
+                trash={trash}
+                moveToTrash={moveToTrash}
+                restoreTrash={restoreTrash}
+                emptyTrash={emptyTrash}
+                notesPersisted={notesPersisted}
+                setNotes={setNotes}
+                onOpenPath={openPath}
+                onCreate={(dirPath, kind) => createInDir(dirPath, kind)}
+                wallpaper={wallpaper}
+                setWallpaper={setWallpaper}
+                darkMode={darkMode}
+                setDarkMode={setDarkMode}
+              />
+            </AppWindow>
+          ))}
+
+        <Dock
+          runningApps={runningApps}
+          onLaunch={(id) => openApp(id)}
+          onFocusApp={(appId) => {
+            const w = windows.filter(x => x.appId === appId).sort((a,b)=>b.z-a.z)[0];
+            if (!w) return openApp(appId);
+            setWindows((prev) => prev.map((x) => (x.id === w.id ? { ...x, minimized: false } : x)));
+            bumpZ(w.id);
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function MenuBar({ clock, appName, appleMenuOpen, setAppleMenuOpen, onOpenApp, onAbout }) {
+  return (
+    <div className="menubar" onClick={(e) => e.stopPropagation()}>
+      <div className="menubar-left">
+        <button
+          className={`menubar-apple ${appleMenuOpen ? "open" : ""}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            setAppleMenuOpen(!appleMenuOpen);
+          }}
+          aria-label="Apple menu"
+          title="Apple"
+        >
+          <Apple size={16} />
+        </button>
+
+        <div className="menubar-appname">{appName ?? "Finder"}</div>
+
+        <div className="menubar-item">File</div>
+        <div className="menubar-item">Edit</div>
+        <div className="menubar-item">View</div>
+        <div className="menubar-item">Go</div>
+        <div className="menubar-item">Window</div>
+        <div className="menubar-item">Help</div>
+
+        {appleMenuOpen && (
+          <div className="menu-pop" onClick={(e) => e.stopPropagation()}>
+            <button className="menu-item" onClick={() => { setAppleMenuOpen(false); onAbout(); }}>
+              About This Web Mac
+            </button>
+            <div className="menu-sep" />
+            <button className="menu-item" onClick={() => { setAppleMenuOpen(false); onOpenApp("finder"); }}>
+              Open Finder
+            </button>
+            <button className="menu-item" onClick={() => { setAppleMenuOpen(false); onOpenApp("notes"); }}>
+              Open Notes
+            </button>
+            <button className="menu-item" onClick={() => { setAppleMenuOpen(false); onOpenApp("terminal"); }}>
+              Open Terminal
+            </button>
+            <button className="menu-item" onClick={() => { setAppleMenuOpen(false); onOpenApp("safari"); }}>
+              Open Safari
+            </button>
+            <button className="menu-item" onClick={() => { setAppleMenuOpen(false); onOpenApp("settings"); }}>
+              Settings
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="menubar-right">
+        <div className="menubar-clock">{clock}</div>
+      </div>
+    </div>
+  );
+}
+
+function Dock({ runningApps, onLaunch, onFocusApp }) {
+  const items = [
+    { id: "finder", label: "Finder", icon: Finder },
+    { id: "safari", label: "Safari", icon: Compass },
+    { id: "notes", label: "Notes", icon: StickyNote },
+    { id: "terminal", label: "Terminal", icon: TerminalSquare },
+    { id: "settings", label: "Settings", icon: Settings },
+    { id: "trash", label: "Trash", icon: Trash2 },
+  ];
+
+  return (
+    <div className="dock-wrap" onClick={(e) => e.stopPropagation()}>
+      <div className="dock">
+        {items.map((it) => {
+          const Icon = it.icon;
+          const running = runningApps.includes(it.id);
+          return (
+            <button
+              key={it.id}
+              className={`dock-item ${running ? "running" : ""}`}
+              title={it.label}
+              onClick={() => (running ? onFocusApp(it.id) : onLaunch(it.id))}
+            >
+              <Icon size={26} />
+              <div className="dock-dot" />
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function DesktopIcons({ items, selection, setSelection, onOpen, onTrash }) {
+  return (
+    <div className="icons" onClick={(e) => e.stopPropagation()}>
+      {items.map((it) => (
+        <div
+          key={it.path}
+          className={`icon ${selection === it.path ? "selected" : ""}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            setSelection(it.path);
+          }}
+          onDoubleClick={() => onOpen(it.path)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            // quick right-click "Move to Trash" for demo
+            if (it.path !== "/Home/Desktop/Welcome.txt") onTrash(it.path);
+          }}
+        >
+          <div className="icon-pic">
+            <IconForItem name={it.name} type={it.node?.type} />
+          </div>
+          <div className="icon-label">{it.name}</div>
+        </div>
+      ))}
+      <div className="hint">
+        <div className="hint-row"><b>Tips</b></div>
+        <div className="hint-row">• Double-click icons to open</div>
+        <div className="hint-row">• Right-click icon → sends to Trash (demo)</div>
+        <div className="hint-row">• Use Dock to launch apps</div>
+      </div>
+    </div>
+  );
+}
+
+function AppWindow({ win, focused, onFocus, onClose, onMin, onMax, boundsRef, setWin, children }) {
+  const minW = 360, minH = 240;
+
+  return (
+    <Rnd
+      bounds={boundsRef}
+      size={{ width: win.w, height: win.h }}
+      position={{ x: win.x, y: win.y }}
+      minWidth={minW}
+      minHeight={minH}
+      disableDragging={false}
+      enableResizing={!win.maximized}
+      onDragStart={onFocus}
+      onResizeStart={onFocus}
+      onDragStop={(e, d) => setWin({ x: d.x, y: d.y })}
+      onResizeStop={(e, dir, ref, delta, pos) => {
+        setWin({ w: ref.offsetWidth, h: ref.offsetHeight, ...pos });
+      }}
+      onMouseDown={onFocus}
+      className={`window ${focused ? "focused" : ""}`}
+    >
+      <WindowChrome
+        title={win.title}
+        focused={focused}
+        onClose={onClose}
+        onMin={onMin}
+        onMax={onMax}
+        maximized={win.maximized}
+      />
+      <div className="win-body">
+        {children}
+      </div>
+    </Rnd>
+  );
+}
+
+function AppRenderer(props) {
+  const { win } = props;
+  switch (win.appId) {
+    case "finder":
+      return <FinderApp {...props} />;
+    case "notes":
+      return <NotesApp {...props} />;
+    case "terminal":
+      return <TerminalApp {...props} />;
+    case "safari":
+      return <SafariApp {...props} />;
+    case "settings":
+      return <SettingsApp {...props} />;
+    case "trash":
+      return <TrashApp {...props} />;
+    default:
+      return <div className="pad">Unknown app.</div>;
+  }
+}
+
+/* ------------------------ Finder ------------------------ */
+function FinderApp({ fs, onOpenPath, onCreate, moveToTrash, win }) {
+  const initial = win.data?.initialPath ?? "/Home";
+  const [path, setPath] = useState(initial);
+  const [selected, setSelected] = useState(null);
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    setPath(initial);
+  }, [initial]);
+
+  const current = fs[path];
+  const children = current?.type === "dir" ? current.children : [];
+  const items = children
+    .map((name) => {
+      const p = pathJoin(path, name);
+      return { name, path: p, node: fs[p] };
+    })
+    .filter((it) => it.name.toLowerCase().includes(query.toLowerCase()));
+
+  function goUp() {
+    if (path === "/") return;
+    setSelected(null);
+    setPath(pathDirname(path));
+  }
+
+  return (
+    <div className="finder">
+      <div className="finder-sidebar">
+        <div className="finder-section">Favourites</div>
+        <SidebarItem label="Home" path="/Home" icon={<Finder size={16} />} active={path === "/Home"} onClick={() => setPath("/Home")} />
+        <SidebarItem label="Desktop" path="/Home/Desktop" icon={<FolderIcon />} active={path === "/Home/Desktop"} onClick={() => setPath("/Home/Desktop")} />
+        <SidebarItem label="Documents" path="/Home/Documents" icon={<FolderIcon />} active={path === "/Home/Documents"} onClick={() => setPath("/Home/Documents")} />
+        <SidebarItem label="Downloads" path="/Home/Downloads" icon={<FolderIcon />} active={path === "/Home/Downloads"} onClick={() => setPath("/Home/Downloads")} />
+        <div className="finder-section">System</div>
+        <SidebarItem label="Applications" path="/Applications" icon={<Apple size={16} />} active={path === "/Applications"} onClick={() => setPath("/Applications")} />
+      </div>
+
+      <div className="finder-main">
+        <div className="finder-toolbar">
+          <button className="btn" onClick={goUp} title="Up">←</button>
+          <div className="pathpill" title={path}>{path}</div>
+
+          <div className="spacer" />
+
+          <div className="search">
+            <Search size={14} />
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search" />
+          </div>
+
+          <button className="btn" onClick={() => onCreate(path, "dir")} title="New Folder"><FolderPlus size={16} /></button>
+          <button className="btn" onClick={() => onCreate(path, "file")} title="New File"><FilePlus2 size={16} /></button>
+        </div>
+
+        <div className="finder-list">
+          {items.length === 0 && <div className="empty">No items</div>}
+          {items.map((it) => (
+            <div
+              key={it.path}
+              className={`row ${selected === it.path ? "selected" : ""}`}
+              onClick={() => setSelected(it.path)}
+              onDoubleClick={() => {
+                if (!it.node) return;
+                if (it.node.type === "dir") setPath(it.path);
+                else onOpenPath(it.path);
+              }}
+            >
+              <div className="row-ico"><IconForItem name={it.name} type={it.node?.type} /></div>
+              <div className="row-name">{it.name}</div>
+              <div className="row-type">{it.node?.type ?? "-"}</div>
+              <button
+                className="row-trash"
+                title="Move to Trash"
+                onClick={(e) => { e.stopPropagation(); moveToTrash(it.path); setSelected(null); }}
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SidebarItem({ label, icon, active, onClick }) {
+  return (
+    <button className={`sidebar-item ${active ? "active" : ""}`} onClick={onClick}>
+      <span className="sidebar-ico">{icon}</span>
+      <span>{label}</span>
+    </button>
+  );
+}
+
+/* ------------------------ Notes ------------------------ */
+function NotesApp({ fs, setFS, notesPersisted, setNotes, win }) {
+  const openFilePath = win.data?.openFilePath;
+  const [mode, setMode] = useState(openFilePath ? "file" : "notes"); // file|notes
+  const [filePath, setFilePath] = useState(openFilePath ?? "/Home/Notes.txt");
+
+  // Load initial notes from persisted state OR Notes.txt
+  const initial = useMemo(() => {
+    if (notesPersisted) return notesPersisted;
+    const n = fs["/Home/Notes.txt"];
+    return n?.type === "file" ? n.content : "";
+  }, [notesPersisted, fs]);
+
+  const [text, setText] = useState(initial);
+
+  useEffect(() => {
+    if (openFilePath) {
+      setMode("file");
+      setFilePath(openFilePath);
+      const n = fs[openFilePath];
+      setText(n?.type === "file" ? n.content : "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openFilePath]);
+
+  useEffect(() => {
+    // autosave notes mode
+    if (mode !== "notes") return;
+    setNotes(text);
+  }, [mode, text, setNotes]);
+
+  function saveFile() {
+    if (!filePath) return;
+    setFS((prev) => {
+      if (!prev[filePath] || prev[filePath].type !== "file") return prev;
+      return { ...prev, [filePath]: { ...prev[filePath], content: text } };
+    });
+  }
+
+  return (
+    <div className="notes">
+      <div className="notes-toolbar">
+        <div className="seg">
+          <button className={`seg-btn ${mode === "notes" ? "on" : ""}`} onClick={() => setMode("notes")}>Notes</button>
+          <button className={`seg-btn ${mode === "file" ? "on" : ""}`} onClick={() => setMode("file")}>File</button>
+        </div>
+        {mode === "file" && (
+          <>
+            <div className="pathpill small" title={filePath}>{filePath}</div>
+            <button className="btn" onClick={saveFile} title="Save to file">Save</button>
+          </>
+        )}
+        <div className="spacer" />
+        <button className="btn" onClick={() => setText("")} title="Clear">Clear</button>
+      </div>
+
+      <textarea
+        className="notes-area"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        spellCheck={false}
+      />
+      {mode === "notes" && <div className="foot">Autosaved to your browser (localStorage).</div>}
+      {mode === "file" && <div className="foot">Edits apply to the virtual filesystem when you press Save.</div>}
+    </div>
+  );
+}
+
+/* ------------------------ Terminal ------------------------ */
+function TerminalApp({ fs, setFS, moveToTrash, onOpenPath }) {
+  const [cwd, setCwd] = useState("/Home");
+  const [lines, setLines] = useState([
+    "Web Terminal — type `help`",
+  ]);
+  const [input, setInput] = useState("");
+  const endRef = useRef(null);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [lines]);
+
+  function println(s = "") {
+    setLines((prev) => [...prev, s]);
+  }
+
+  function run(cmdline) {
+    const trimmed = cmdline.trim();
+    if (!trimmed) return;
+
+    println(`$ ${trimmed}`);
+
+    const [cmd, ...args] = splitArgs(trimmed);
+    const a0 = args[0];
+
+    try {
+      if (cmd === "help") {
+        println("Commands:");
+        println("  ls [path]        list directory");
+        println("  cd <path>        change directory");
+        println("  pwd              print working directory");
+        println("  cat <file>       show file");
+        println("  touch <file>     create empty file");
+        println("  mkdir <dir>      create directory");
+        println("  rm <path>        move item to Trash");
+        println("  open <path>      open in Finder / Notes");
+        println("  clear            clear terminal");
+        println("  date             print date");
+        return;
+      }
+
+      if (cmd === "clear") {
+        setLines([]);
+        return;
+      }
+
+      if (cmd === "date") {
+        println(new Date().toString());
+        return;
+      }
+
+      if (cmd === "pwd") {
+        println(cwd);
+        return;
+      }
+
+      if (cmd === "ls") {
+        const p = resolvePath(cwd, a0 ?? ".");
+        const node = fs[p];
+        if (!node) throw new Error("No such file or directory");
+        if (node.type !== "dir") throw new Error("Not a directory");
+        println(node.children.join("  "));
+        return;
+      }
+
+      if (cmd === "cd") {
+        if (!a0) throw new Error("Usage: cd <path>");
+        const p = resolvePath(cwd, a0);
+        const node = fs[p];
+        if (!node) throw new Error("No such directory");
+        if (node.type !== "dir") throw new Error("Not a directory");
+        setCwd(p);
+        return;
+      }
+
+      if (cmd === "cat") {
+        if (!a0) throw new Error("Usage: cat <file>");
+        const p = resolvePath(cwd, a0);
+        const node = fs[p];
+        if (!node) throw new Error("No such file");
+        if (node.type !== "file") throw new Error("Not a file");
+        println(node.content || "");
+        return;
+      }
+
+      if (cmd === "touch") {
+        if (!a0) throw new Error("Usage: touch <file>");
+        const p = resolvePath(cwd, a0);
+        const parent = pathDirname(p);
+        const name = pathBasename(p);
+
+        setFS((prev) => {
+          const par = prev[parent];
+          if (!par || par.type !== "dir") return prev;
+          if (prev[p]) return prev;
+          return {
+            ...prev,
+            [parent]: { ...par, children: [...par.children, name] },
+            [p]: { type: "file", content: "" }
+          };
+        });
+        return;
+      }
+
+      if (cmd === "mkdir") {
+        if (!a0) throw new Error("Usage: mkdir <dir>");
+        const p = resolvePath(cwd, a0);
+        const parent = pathDirname(p);
+        const name = pathBasename(p);
+
+        setFS((prev) => {
+          const par = prev[parent];
+          if (!par || par.type !== "dir") return prev;
+          if (prev[p]) return prev;
+          return {
+            ...prev,
+            [parent]: { ...par, children: [...par.children, name] },
+            [p]: { type: "dir", children: [] }
+          };
+        });
+        return;
+      }
+
+      if (cmd === "rm") {
+        if (!a0) throw new Error("Usage: rm <path>");
+        const p = resolvePath(cwd, a0);
+        if (!fs[p]) throw new Error("No such path");
+        moveToTrash(p);
+        println("Moved to Trash.");
+        return;
+      }
+
+      if (cmd === "open") {
+        if (!a0) throw new Error("Usage: open <path>");
+        const p = resolvePath(cwd, a0);
+        if (!fs[p]) throw new Error("No such path");
+        onOpenPath(p);
+        return;
+      }
+
+      println(`Command not found: ${cmd}`);
+    } catch (e) {
+      println(`Error: ${e.message ?? String(e)}`);
+    }
+  }
+
+  return (
+    <div className="terminal">
+      <div className="terminal-top">
+        <div className="pathpill small">cwd: {cwd}</div>
+        <div className="spacer" />
+        <button className="btn" onClick={() => println("")} title="New line">↩︎</button>
+        <button className="btn" onClick={() => setLines([])} title="Clear"><RefreshCcw size={16} /></button>
+      </div>
+
+      <div className="terminal-body">
+        {lines.map((l, i) => (
+          <div key={i} className="terminal-line">{l}</div>
+        ))}
+        <div ref={endRef} />
+      </div>
+
+      <div className="terminal-input">
+        <span className="prompt">$</span>
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              const s = input;
+              setInput("");
+              run(s);
+            }
+          }}
+          placeholder="Type a command…"
+          spellCheck={false}
+        />
+      </div>
+    </div>
+  );
+}
+
+function splitArgs(s) {
+  // simple quote-aware split
+  const out = [];
+  let cur = "";
+  let q = null;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if ((ch === '"' || ch === "'")) {
+      if (q === ch) q = null;
+      else if (!q) q = ch;
+      else cur += ch;
+      continue;
+    }
+    if (!q && /\s/.test(ch)) {
+      if (cur) out.push(cur), (cur = "");
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+function resolvePath(cwd, p) {
+  if (!p || p === ".") return cwd;
+  if (p.startsWith("/")) return normalizePath(p);
+  const joined = pathJoin(cwd, p);
+  return normalizePath(joined);
+}
+
+function normalizePath(p) {
+  const parts = p.split("/").filter(Boolean);
+  const out = [];
+  for (const part of parts) {
+    if (part === ".") continue;
+    if (part === "..") out.pop();
+    else out.push(part);
+  }
+  return "/" + out.join("/");
+}
+
+/* ------------------------ Safari ------------------------ */
+function SafariApp() {
+  const [url, setUrl] = useState("https://example.com");
+  const [current, setCurrent] = useState("https://example.com");
+  const [err, setErr] = useState(null);
+
+  function go() {
+    let u = url.trim();
+    if (!u) return;
+    if (!/^https?:\/\//i.test(u)) u = "https://" + u;
+    setErr(null);
+    setCurrent(u);
+  }
+
+  return (
+    <div className="safari">
+      <div className="safari-toolbar">
+        <div className="urlbar">
+          <input
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && go()}
+            placeholder="Enter URL…"
+            spellCheck={false}
+          />
+        </div>
+        <button className="btn" onClick={go}>Go</button>
+      </div>
+      {err && <div className="warn">{err}</div>}
+      <iframe
+        className="safari-frame"
+        src={current}
+        title="Safari"
+        onError={() => setErr("This site cannot be loaded.")}
+      />
+      <div className="foot">
+        Note: some sites block embedding in iframes (that’s normal).
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------ Settings ------------------------ */
+function SettingsApp({ wallpaper, setWallpaper, darkMode, setDarkMode }) {
+  return (
+    <div className="settings">
+      <div className="settings-left">
+        <div className="settings-title">Settings</div>
+        <div className="settings-item">
+          <div className="settings-label">Appearance</div>
+          <div className="seg">
+            <button className={`seg-btn ${darkMode ? "on" : ""}`} onClick={() => setDarkMode(true)}>Dark</button>
+            <button className={`seg-btn ${!darkMode ? "on" : ""}`} onClick={() => setDarkMode(false)}>Light</button>
+          </div>
+        </div>
+        <div className="settings-item">
+          <div className="settings-label">Wallpaper</div>
+          <div className="wall-grid">
+            {WALLPAPERS.map((w) => (
+              <button
+                key={w.id}
+                className={`wall-tile ${w.id === wallpaper ? "on" : ""} ${w.className}`}
+                onClick={() => setWallpaper(w.id)}
+                title={w.name}
+              />
+            ))}
+          </div>
+        </div>
+        <div className="settings-item">
+          <div className="settings-label">Reset</div>
+          <button className="btn danger" onClick={() => { localStorage.removeItem(LS_KEY); location.reload(); }}>
+            Reset all data
+          </button>
+          <div className="smallmuted">Clears notes, files, wallpaper, and trash.</div>
+        </div>
+      </div>
+
+      <div className="settings-right">
+        <div className="card">
+          <div className="card-title">About This Web Mac</div>
+          <div className="card-text">
+            This is a browser-based desktop UI inspired by macOS. It’s not real macOS and can’t run Mac apps,
+            but it can behave like a lightweight “web OS” with windows, a dock, and apps.
+          </div>
+          <div className="card-text smallmuted">
+            Built with React + react-rnd.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------ Trash ------------------------ */
+function TrashApp({ trash, restoreTrash, emptyTrash }) {
+  return (
+    <div className="trash">
+      <div className="trash-toolbar">
+        <div className="pathpill">Trash</div>
+        <div className="spacer" />
+        <button className="btn danger" onClick={emptyTrash} disabled={trash.length === 0}>
+          Empty Trash
+        </button>
+      </div>
+
+      <div className="trash-list">
+        {trash.length === 0 && <div className="empty">Trash is empty.</div>}
+        {trash.map((it, i) => (
+          <div key={i} className="row">
+            <div className="row-ico"><Trash2 size={18} /></div>
+            <div className="row-name">{it.itemName}</div>
+            <div className="row-type">from {it.fromPath}</div>
+            <button className="btn" onClick={() => restoreTrash(i)}>Restore</button>
+          </div>
+        ))}
+      </div>
+      <div className="foot">
+        Restore puts items back where possible, otherwise on Desktop.
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------ Helpers ------------------------ */
+function snapshotNode(fs, basePath) {
+  // Return a map of all nodes under basePath (including basePath)
+  const node = fs[basePath];
+  if (!node) return {};
+  const out = { [basePath]: deepClone(node) };
+  if (node.type === "dir") {
+    for (const child of node.children) {
+      const childPath = pathJoin(basePath, child);
+      Object.assign(out, snapshotNode(fs, childPath));
+    }
+  }
+  return out;
+}
+
+function rewriteSnapshotBase(snapshot, oldBase, newBase) {
+  const out = {};
+  for (const [k, v] of Object.entries(snapshot)) {
+    const nk = k === oldBase ? newBase : k.replace(oldBase + "/", newBase + "/");
+    out[nk] = deepClone(v);
+  }
+  // also fix directory children names if base folder name changed:
+  // (we keep children names same; only the path root changes)
+  return out;
+}
+
+function deepClone(x) {
+  return JSON.parse(JSON.stringify(x));
+}
+
+function getFocusedAppName(windows, focusedId) {
+  const w = windows.find((x) => x.id === focusedId);
+  if (!w) return "Finder";
+  return APP_REGISTRY[w.appId]?.title ?? "App";
+}
+
+
+# 2) Install deps
+npm i react-rnd lucide-react
+
+# 3) Run
+npm run dev
